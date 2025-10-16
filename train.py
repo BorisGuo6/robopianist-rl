@@ -102,6 +102,10 @@ def get_env(args: Args, record_dir: Optional[Path] = None):
         )
     else:
         env = wrappers.EpisodeStatisticsWrapper(environment=env, deque_size=1)
+        # Always add MidiEvaluationWrapper for musical metrics, even without video recording
+        env = robopianist_wrappers.MidiEvaluationWrapper(
+            environment=env, deque_size=1
+        )
     if args.action_reward_observation:
         env = wrappers.ObservationActionRewardWrapper(env)
     env = wrappers.ConcatObservationWrapper(env)
@@ -140,7 +144,8 @@ def main(args: Args) -> None:
     )
 
     env = get_env(args)
-    eval_env = get_env(args, record_dir=experiment_dir / "eval")
+    # Enable video recording for evaluation
+    eval_env = get_env(args, record_dir=None)  # 禁用视频录制以避免OpenGL错误
 
     spec = specs.EnvironmentSpec.make(env)
 
@@ -196,12 +201,66 @@ def main(args: Args) -> None:
             log_dict = prefix_dict("eval", eval_env.get_statistics())
             music_dict = prefix_dict("eval", eval_env.get_musical_metrics())
             wandb.log(log_dict | music_dict, step=i)
-            video = wandb.Video(str(eval_env.latest_filename), fps=4, format="mp4")
-            wandb.log({"video": video, "global_step": i})
-            eval_env.latest_filename.unlink()
+            
+            # 跳过视频录制以避免OpenGL错误
+            print(f"步骤 {i}: 评估完成，跳过视频录制以避免渲染错误")
+            
+            # Save checkpoint every 100k steps
+            if i % 100000 == 0 and i > 0:
+                checkpoint_path = experiment_dir / f"checkpoint_{i}.pkl"
+                try:
+                    import pickle
+                    
+                    # Extract all trainable parameters from SAC agent
+                    model_data = {
+                        'actor_params': agent.actor.params,
+                        'critic_params': agent.critic.params,
+                        'target_critic_params': agent.target_critic.params,
+                        'temp_params': agent.temp.params,
+                        'tau': agent.tau,
+                        'discount': agent.discount,
+                        'target_entropy': agent.target_entropy,
+                        'step': i
+                    }
+                    
+                    with open(checkpoint_path, 'wb') as f:
+                        pickle.dump(model_data, f)
+                    print(f"检查点已保存: {checkpoint_path}")
+                    wandb.save(str(checkpoint_path))
+                except Exception as e:
+                    print(f"保存检查点时出错: {e}")
 
         if i % args.log_interval == 0:
             wandb.log({"train/fps": int(i / (time.time() - start_time))}, step=i)
+
+    # Save final model
+    print(f"\n=== 训练完成，保存模型 ===")
+    final_model_path = experiment_dir / "final_model.pkl"
+    try:
+        # Save agent parameters
+        import pickle
+        
+        # Extract all trainable parameters from SAC agent
+        model_data = {
+            'actor_params': agent.actor.params,
+            'critic_params': agent.critic.params,
+            'target_critic_params': agent.target_critic.params,
+            'temp_params': agent.temp.params,
+            'tau': agent.tau,
+            'discount': agent.discount,
+            'target_entropy': agent.target_entropy
+        }
+        
+        with open(final_model_path, 'wb') as f:
+            pickle.dump(model_data, f)
+        print(f"模型权重已保存到: {final_model_path}")
+        
+        # Also save to wandb
+        wandb.save(str(final_model_path))
+        print("模型已上传到 wandb")
+        
+    except Exception as e:
+        print(f"保存模型时出错: {e}")
 
 
 if __name__ == "__main__":
